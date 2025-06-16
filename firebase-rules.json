@@ -1,0 +1,53 @@
+{
+  "rules": {
+    // Users can read and write their own user data
+    "users": {
+      "$uid": {
+        ".read": "$uid === auth.uid",
+        ".write": "$uid === auth.uid"
+      }
+    },
+    
+    // Consultants data - allow read access for authentication verification
+    "consultants": {
+      ".read": true,
+      ".write": false
+    },
+    
+    // Messages - authenticated users and guests can read and write messages
+    "messages": {
+      "$countryCode": {
+        "$category": {
+          "$roomType": {
+            ".read": true,
+            ".write": true,
+            ".indexOn": ["expiresAt", "timestamp"],
+            "$messageId": {
+              ".validate": "newData.hasChildren(['senderId', 'senderName', 'senderType', 'content', 'timestamp', 'country', 'category', 'roomType', 'expiresAt'])"
+            }
+          }
+        }
+      }
+    },
+    
+    // Chat rooms metadata (user counts, presence, etc.)
+    "rooms": {
+      "$roomId": {
+        ".read": true,
+        ".write": true,
+        "users": {
+          "$uid": {
+            ".read": true,
+            ".write": true
+          }
+        }
+      }
+    },
+    
+    // Default deny all other paths
+    "$other": {
+      ".read": false,
+      ".write": false
+    }
+  }
+}

@@ -20,7 +20,6 @@ const ChatRoom: React.FC = () => {
   const [selectedMessage, setSelectedMessage] = useState<string | null>(null);
   const [highlightedMessage, setHighlightedMessage] = useState<string | null>(null);
   const [messageTimers, setMessageTimers] = useState<{ [key: string]: NodeJS.Timeout[] }>({});
-  const [localMessageStatuses, setLocalMessageStatuses] = useState<{ [key: string]: string }>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messageRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
 
@@ -77,9 +76,13 @@ const ChatRoom: React.FC = () => {
         const sortedMessages = messagesList.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
         setMessages(sortedMessages);
         
-        // Set up timers for new questions that don't have timers yet
+        // Set up timers for new questions that don't have timers yet and aren't already processed
         sortedMessages.forEach(message => {
-          if (isQuestion(message.content) && !message.hasConsultantReply && !messageTimers[message.id]) {
+          if (isQuestion(message.content) && 
+              !message.hasConsultantReply && 
+              !message.isUnanswered && 
+              !messageTimers[message.id] &&
+              message.status !== 'unanswered') {
             setupMessageTimer(message);
           }
         });
@@ -138,41 +141,73 @@ const ChatRoom: React.FC = () => {
     
     try {
       await update(messageRef, { status, ...additionalData });
-      // Also update local state for immediate UI feedback
-      setLocalMessageStatuses(prev => ({
-        ...prev,
-        [messageId]: status
-      }));
     } catch (error) {
       console.error('Error updating message status:', error);
     }
   };
 
   const setupMessageTimer = (message: Message) => {
-    if (!isQuestion(message.content) || message.hasConsultantReply) return;
+    if (!isQuestion(message.content) || message.hasConsultantReply || message.isUnanswered) return;
 
     // Clear any existing timers for this message
     clearMessageTimers(message.id);
 
-    // First timer: 30 seconds - turn yellow
-    const timer1 = setTimeout(() => {
+    const messageTime = new Date(message.timestamp).getTime();
+    const now = Date.now();
+    const elapsed = now - messageTime;
+
+    // Calculate remaining time for each status
+    const yellowTime = 30000; // 30 seconds
+    const orangeTime = 60000; // 60 seconds (30 + 30)
+    const redTime = 120000; // 120 seconds (60 + 60)
+
+    const timers: NodeJS.Timeout[] = [];
+
+    // Set timer for yellow status (30 seconds)
+    if (elapsed < yellowTime) {
+      const timer1 = setTimeout(() => {
+        updateMessageStatus(message.id, 'pending');
+      }, yellowTime - elapsed);
+      timers.push(timer1);
+    } else if (elapsed < orangeTime && !message.status) {
+      // Already past yellow time, set to yellow immediately
       updateMessageStatus(message.id, 'pending');
-    }, 30000);
+    }
 
-    // Second timer: 60 seconds - turn orange
-    const timer2 = setTimeout(() => {
+    // Set timer for orange status (60 seconds)
+    if (elapsed < orangeTime) {
+      const timer2 = setTimeout(() => {
+        updateMessageStatus(message.id, 'urgent');
+      }, orangeTime - elapsed);
+      timers.push(timer2);
+    } else if (elapsed < redTime && message.status !== 'urgent') {
+      // Already past orange time, set to orange immediately
       updateMessageStatus(message.id, 'urgent');
-    }, 60000);
+    }
 
-    // Third timer: 120 seconds - mark as unanswered
-    const timer3 = setTimeout(() => {
-      updateMessageStatus(message.id, 'unanswered', { isUnanswered: true });
-    }, 120000);
+    // Set timer for red status (120 seconds) - mark as unanswered
+    if (elapsed < redTime) {
+      const timer3 = setTimeout(() => {
+        updateMessageStatus(message.id, 'unanswered', { 
+          isUnanswered: true,
+          unansweredAt: new Date().toISOString()
+        });
+        // Clear timers after marking as unanswered
+        clearMessageTimers(message.id);
+      }, redTime - elapsed);
+      timers.push(timer3);
+    } else if (!message.isUnanswered) {
+      // Already past red time, mark as unanswered immediately
+      updateMessageStatus(message.id, 'unanswered', { 
+        isUnanswered: true,
+        unansweredAt: new Date().toISOString()
+      });
+    }
 
-    // Store all three timers for proper cleanup
+    // Store timers for cleanup
     setMessageTimers(prev => ({
       ...prev,
-      [message.id]: [timer1, timer2, timer3]
+      [message.id]: timers
     }));
   };
 
@@ -185,12 +220,6 @@ const ChatRoom: React.FC = () => {
         return newTimers;
       });
     }
-    // Also clear local status
-    setLocalMessageStatuses(prev => {
-      const newStatuses = { ...prev };
-      delete newStatuses[messageId];
-      return newStatuses;
-    });
   };
 
   const sendMessage = async (e: React.FormEvent) => {
@@ -239,24 +268,39 @@ const ChatRoom: React.FC = () => {
     try {
       const messageRef = await push(ref(database, `messages/${countryCode}/${category}/${roomType}`), message);
       
-      // If this is a consultant reply to a question, mark the original question as answered
+      // If this is a consultant reply to a question
       if (isConsultant && replyingTo && isQuestion(replyingTo.content)) {
         const originalMessageRef = ref(database, `messages/${countryCode}/${category}/${roomType}/${replyingTo.id}`);
-        await update(originalMessageRef, { 
-          hasConsultantReply: true,
-          status: 'answered',
-          answeredAt: now.toISOString(),
-          answeredBy: currentUser.uid
-        });
         
-        // Clear all timers for the original message
-        clearMessageTimers(replyingTo.id);
+        // Only mark as answered if the question hasn't been marked as unanswered
+        if (!replyingTo.isUnanswered) {
+          await update(originalMessageRef, { 
+            hasConsultantReply: true,
+            status: 'answered',
+            answeredAt: now.toISOString(),
+            answeredBy: currentUser.uid
+          });
+          
+          // Clear all timers for the original message
+          clearMessageTimers(replyingTo.id);
+        } else {
+          // If already marked as unanswered, just add the reply info but keep it as unanswered
+          await update(originalMessageRef, { 
+            hasConsultantReply: true,
+            repliedAfterUnanswered: true,
+            lateReplyAt: now.toISOString(),
+            lateReplyBy: currentUser.uid
+          });
+        }
       }
 
-      // If this is a new question, set up timer
+      // If this is a new question from a non-consultant, set up timer
       if (isQuestion(newMessage.trim()) && !isConsultant) {
         const newMessageData = { ...message, id: messageRef.key! };
-        setupMessageTimer(newMessageData);
+        // Small delay to ensure the message is in the database before setting up timer
+        setTimeout(() => {
+          setupMessageTimer(newMessageData);
+        }, 100);
       }
 
       if (currentUser.isGuest) {
@@ -358,14 +402,22 @@ const ChatRoom: React.FC = () => {
   };
 
   const getMessageStatusColor = (message: Message) => {
-    if (!isQuestion(message.content) || message.hasConsultantReply) {
+    if (!isQuestion(message.content)) {
       return '';
     }
 
-    // Use local status first (for immediate feedback), then fallback to message status
-    const currentStatus = localMessageStatuses[message.id] || message.status;
+    // If message is marked as unanswered, always show red
+    if (message.isUnanswered) {
+      return 'bg-red-500/30 border-red-400/50 shadow-red-500/20';
+    }
 
-    switch (currentStatus) {
+    // If message has consultant reply and wasn't marked as unanswered, no special color
+    if (message.hasConsultantReply && !message.isUnanswered) {
+      return '';
+    }
+
+    // Check current status for pending questions
+    switch (message.status) {
       case 'pending':
         return 'bg-yellow-500/30 border-yellow-400/50 shadow-yellow-500/20';
       case 'urgent':
@@ -565,8 +617,7 @@ const ChatRoom: React.FC = () => {
                 const isHighlighted = highlightedMessage === message.id;
                 const statusColor = getMessageStatusColor(message);
                 const isQuestionMessage = isQuestion(message.content);
-                const currentStatus = localMessageStatuses[message.id] || message.status;
-                const showUnansweredIcon = isQuestionMessage && (currentStatus === 'unanswered' || message.isUnanswered);
+                const showUnansweredIcon = isQuestionMessage && message.isUnanswered;
                 
                 return (
                   <div
@@ -641,7 +692,7 @@ const ChatRoom: React.FC = () => {
                               {message.content}
                             </p>
 
-                            {/* Message timestamp and expiry */}
+                            {/* Message timestamp and status */}
                             <div className={`flex items-center space-x-2 mt-2 text-xs ${isOwn ? 'justify-end text-blue-100' : 'justify-start text-blue-300'}`}>
                               <span>
                                 {new Date(message.timestamp).toLocaleTimeString()}
@@ -650,20 +701,19 @@ const ChatRoom: React.FC = () => {
                                 <Sparkles className="h-3 w-3 mr-1" />
                                 {Math.ceil((new Date(message.expiresAt).getTime() - Date.now()) / (1000 * 60 * 60))}h
                               </span>
-                              {isQuestionMessage && !message.hasConsultantReply && currentStatus !== 'unanswered' && !message.isUnanswered && (
+                              {isQuestionMessage && (
                                 <span className={`text-xs font-medium ${
-                                  currentStatus === 'pending' ? 'text-yellow-300' :
-                                  currentStatus === 'urgent' ? 'text-orange-300' :
-                                  'text-yellow-300'
+                                  message.isUnanswered ? 'text-red-300' :
+                                  message.hasConsultantReply ? 'text-green-300' :
+                                  message.status === 'pending' ? 'text-yellow-300' :
+                                  message.status === 'urgent' ? 'text-orange-300' :
+                                  'text-blue-300'
                                 }`}>
-                                  {currentStatus === 'pending' ? 'Pending expert reply' :
-                                   currentStatus === 'urgent' ? 'Urgent - awaiting reply' :
-                                   'Awaiting expert reply'}
-                                </span>
-                              )}
-                              {showUnansweredIcon && (
-                                <span className="text-red-300 text-xs font-medium">
-                                  Unanswered
+                                  {message.isUnanswered ? 'Unanswered' :
+                                   message.hasConsultantReply ? 'Answered' :
+                                   message.status === 'pending' ? 'Pending reply' :
+                                   message.status === 'urgent' ? 'Urgent' :
+                                   'Awaiting reply'}
                                 </span>
                               )}
                             </div>

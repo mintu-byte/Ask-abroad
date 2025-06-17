@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Crown, BarChart3, Users, MessageCircle, AlertTriangle, TrendingUp, Calendar, Target, CheckCircle, XCircle, Clock, Globe, PieChart } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { ref, onValue, query, orderByChild, equalTo } from 'firebase/database';
+import { ref, onValue } from 'firebase/database';
 import { database } from '../config/firebase';
 import { Message } from '../types';
 import { countries } from '../data/countries';
@@ -57,12 +57,14 @@ const ConsultantDashboard: React.FC = () => {
     const categories = ['study', 'travel', 'visa'];
     const roomTypes = ['general', 'visa'];
     
-    let totalQuestionsAnswered = 0;
-    let totalQuestionsNotAnswered = 0;
-    let todayQuestionsAnswered = 0;
-    let todayQuestionsNotAnswered = 0;
+    let questionsAnsweredToday = 0;
+    let questionsNotAnsweredToday = 0;
+    let questionsAnsweredTotal = 0;
+    let questionsNotAnsweredTotal = 0;
 
     const unsubscribes: (() => void)[] = [];
+    let processedCountries = 0;
+    const totalCountries = countries.length;
 
     countries.forEach(country => {
       categories.forEach(category => {
@@ -77,34 +79,44 @@ const ConsultantDashboard: React.FC = () => {
             if (data) {
               const messages = Object.values(data) as Message[];
               
-              // Reset counters for this room
-              let roomAnsweredToday = 0;
-              let roomNotAnsweredToday = 0;
-              let roomAnsweredTotal = 0;
-              let roomNotAnsweredTotal = 0;
-              
               messages.forEach(message => {
-                // Check if it's a question
+                // Only process questions (messages with ?)
                 if (message.content.includes('?')) {
                   const messageDate = new Date(message.timestamp);
                   const isToday = messageDate >= startOfDay && messageDate < endOfDay;
                   
-                  // Check if this consultant answered the question
-                  if (message.hasConsultantReply && message.answeredBy === currentUser.uid) {
-                    roomAnsweredTotal++;
-                    if (isToday) roomAnsweredToday++;
-                  } else if (message.isUnanswered) {
-                    roomNotAnsweredTotal++;
-                    if (isToday) roomNotAnsweredToday++;
+                  // Check if this consultant answered the question within 2 minutes
+                  if (message.hasConsultantReply && 
+                      message.answeredBy === currentUser.uid && 
+                      !message.isUnanswered) {
+                    questionsAnsweredTotal++;
+                    if (isToday) questionsAnsweredToday++;
+                  } 
+                  // Check if question is marked as unanswered
+                  else if (message.isUnanswered) {
+                    questionsNotAnsweredTotal++;
+                    if (isToday) questionsNotAnsweredToday++;
                   }
                 }
               });
+            }
+            
+            processedCountries++;
+            
+            // Update stats when all countries are processed
+            if (processedCountries >= totalCountries * categories.length) {
+              const newStats = {
+                questionsAnsweredToday,
+                questionsNotAnsweredToday,
+                questionsAnsweredTotal,
+                questionsNotAnsweredTotal,
+                conversionsToday: stats.conversionsToday,
+                conversionsTotal: stats.conversionsTotal
+              };
               
-              // Update totals (this is a simplified approach - in production you'd want more sophisticated tracking)
-              totalQuestionsAnswered += roomAnsweredTotal;
-              totalQuestionsNotAnswered += roomNotAnsweredTotal;
-              todayQuestionsAnswered += roomAnsweredToday;
-              todayQuestionsNotAnswered += roomNotAnsweredToday;
+              setStats(newStats);
+              localStorage.setItem(`consultantStats_${currentUser.uid}`, JSON.stringify(newStats));
+              setLoading(false);
             }
           });
           
@@ -112,21 +124,6 @@ const ConsultantDashboard: React.FC = () => {
         });
       });
     });
-
-    // Update stats periodically
-    const updateStatsInterval = setInterval(() => {
-      const newStats = {
-        questionsAnsweredToday: todayQuestionsAnswered,
-        questionsNotAnsweredToday: todayQuestionsNotAnswered,
-        questionsAnsweredTotal: totalQuestionsAnswered,
-        questionsNotAnsweredTotal: totalQuestionsNotAnswered,
-        conversionsToday: stats.conversionsToday,
-        conversionsTotal: stats.conversionsTotal
-      };
-      
-      setStats(newStats);
-      localStorage.setItem(`consultantStats_${currentUser.uid}`, JSON.stringify(newStats));
-    }, 5000); // Update every 5 seconds
 
     // Get country stats
     const countryStatsPromises = countries.map(country => {
@@ -161,12 +158,10 @@ const ConsultantDashboard: React.FC = () => {
     Promise.all(countryStatsPromises).then(stats => {
       const sortedStats = stats.sort((a, b) => b.onlineUsers - a.onlineUsers);
       setCountryStats(sortedStats);
-      setLoading(false);
     });
 
     return () => {
       unsubscribes.forEach(unsubscribe => unsubscribe());
-      clearInterval(updateStatsInterval);
     };
   }, [currentUser]);
 
@@ -178,7 +173,7 @@ const ConsultantDashboard: React.FC = () => {
 
     const newStats = {
       ...stats,
-      conversionsToday: conversions,
+      conversionsToday: stats.conversionsToday + conversions,
       conversionsTotal: stats.conversionsTotal + conversions
     };
 
@@ -290,7 +285,7 @@ const ConsultantDashboard: React.FC = () => {
               <div className="flex items-center justify-between mb-4">
                 <BarChart3 className="h-8 w-8 text-purple-400" />
                 <span className="text-2xl font-bold text-purple-400">
-                  {stats.questionsAnsweredToday > 0 ? 
+                  {(stats.questionsAnsweredToday + stats.questionsNotAnsweredToday) > 0 ? 
                     Math.round((stats.questionsAnsweredToday / (stats.questionsAnsweredToday + stats.questionsNotAnsweredToday)) * 100) : 0}%
                 </span>
               </div>
@@ -527,7 +522,7 @@ const ConsultantDashboard: React.FC = () => {
                   className="px-6 py-3 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-xl hover:from-orange-600 hover:to-red-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex items-center space-x-2"
                 >
                   <Target className="h-4 w-4" />
-                  <span>Update</span>
+                  <span>Add</span>
                 </button>
               </div>
             </div>
@@ -542,23 +537,24 @@ const ConsultantDashboard: React.FC = () => {
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="bg-white/10 rounded-xl p-6">
-              <h3 className="text-lg font-semibold text-white mb-3">Response Time</h3>
+              <h3 className="text-lg font-semibold text-white mb-3">Response Time Guidelines</h3>
               <p className="text-purple-100 text-sm mb-4">
                 Questions turn yellow after 30 seconds, orange after 1 minute, and get marked as unanswered after 2 minutes.
+                Once marked as unanswered, they remain unanswered even if replied to later.
               </p>
               <div className="flex items-center space-x-2 text-yellow-300">
                 <Clock className="h-4 w-4" />
-                <span className="text-sm">Aim to respond within 30 seconds for best results</span>
+                <span className="text-sm">Aim to respond within 2 minutes for best results</span>
               </div>
             </div>
             <div className="bg-white/10 rounded-xl p-6">
               <h3 className="text-lg font-semibold text-white mb-3">Quality Metrics</h3>
               <p className="text-purple-100 text-sm mb-4">
-                Focus on answering questions thoroughly and converting users to take action on their goals.
+                Focus on answering questions thoroughly within the 2-minute window and converting users to take action on their goals.
               </p>
               <div className="flex items-center space-x-2 text-green-300">
                 <CheckCircle className="h-4 w-4" />
-                <span className="text-sm">Quality over quantity for maximum impact</span>
+                <span className="text-sm">Quality and speed for maximum impact</span>
               </div>
             </div>
           </div>
